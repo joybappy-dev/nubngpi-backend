@@ -59,6 +59,54 @@ async function run() {
       res.status(200).send({ studentProfile, studentResult });
     });
 
+    app.get("/api/latest/results", async (req, res) => {
+      try {
+        const latestResults = await resultCollection
+          .aggregate([
+            // 1. Join with students collection
+            {
+              $lookup: {
+                from: "students", // Name of your students collection
+                localField: "roll", // Field in results
+                foreignField: "roll", // Field in students
+                as: "studentDetails", // Name of the array to output
+              },
+            },
+            // 2. Convert studentDetails array to a single object
+            {
+              $unwind: {
+                path: "$studentDetails",
+                preserveNullAndEmptyArrays: true, // Keep result even if student info is missing
+              },
+            },
+            // 3. Project only the fields you need for a clean response
+            {
+              $project: {
+                _id: 1,
+                roll: 1,
+                status: 1,
+                latestGpa: 1,
+                latestSemester: 1,
+                referredSubjects: 1,
+                // Map student info to clean keys
+                studentName: "$studentDetails.name",
+                registration: "$studentDetails.registration",
+                studentImage: "$studentDetails.img",
+                department: "$studentDetails.department",
+              },
+            },
+            // 4. Sort by latest GPA (optional, good for rankings)
+            { $sort: { latestGpa: -1 } },
+          ])
+          .toArray();
+
+        res.status(200).json(latestResults);
+      } catch (error) {
+        console.error("Error fetching latest results:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
     // POST new result
     app.post(
       "/api/upload-result",
