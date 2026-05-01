@@ -107,50 +107,91 @@ async function run() {
       }
     });
 
-    // POST new result
     app.post(
       "/api/upload-result",
       upload.single("result-pdf"),
       async (req, res) => {
         try {
-          if (!req.file) {
+          if (!req.file)
             return res.status(400).send({ message: "No file uploaded" });
-          }
 
-          // console.log("Processing file:", req.file.originalname);
-
-          // 1. Initialize the parser using the BUFFER from memory
-          // Instead of 'url', we use 'data'
           const parser = new PDFParse({ data: req.file.buffer });
-
-          // 2. Extract the text
           const result = await parser.getText();
-
-          // 3. Log the result to see what we're working with
-          // console.log("--- Extracted Content Start ---");
-          // console.log(result.text);
-          // console.log("--- Extracted Content End ---");
-
-          // 4. Clean up the parser instance to free up memory
           await parser.destroy();
 
-          // CALL THE PARSER
-          // console.log(result.text);
-          const structuredData = parseBTEBResult(result.text);
-          // console.log(structuredData.students);
+          const { students, currentExamSemester, publishDate } =
+            parseBTEBResult(result.text);
 
-          await resultCollection.deleteMany({});
-          const dbresult = await resultCollection.insertMany(
-            structuredData.students,
+          if (students.length === 0) {
+            return res.status(422).send({ message: "No student data found" });
+          }
+
+          const bulkOps = students.map((s) => {
+            // Determine highest semester key to find the "latest" GPA
+            const semKeys = Object.keys(s.gpas)
+              .map(Number)
+              .sort((a, b) => b - a);
+            const highestSem =
+              semKeys.length > 0 ? semKeys[0] : currentExamSemester;
+            const latestGpaVal = s.gpas[highestSem];
+            const latestGPAStr =
+              latestGpaVal !== null ? latestGpaVal.toString() : "ref";
+
+            const updateFields = {
+              lastSeenExam: currentExamSemester,
+              latestGPA: latestGPAStr,
+              referredSubjects: s.referredSubjects,
+              isArchived: false,
+            };
+
+            // Dynamically build the nested 'semesters' object using MongoDB dot notation
+            semKeys.forEach((semNum) => {
+              if (semNum === currentExamSemester) {
+                // Write full data for the current exam semester
+                updateFields[`semesters.${semNum}`] = {
+                  gpa: s.gpas[semNum],
+                  status: s.status,
+                  publishedDate: publishDate,
+                };
+              } else {
+                // For historical semesters, only update GPA and status (if they cleared a referral)
+                updateFields[`semesters.${semNum}.gpa`] = s.gpas[semNum];
+                if (s.gpas[semNum] !== null) {
+                  updateFields[`semesters.${semNum}.status`] = "PASSED";
+                }
+              }
+            });
+
+            return {
+              updateOne: {
+                filter: { roll: s.roll },
+                update: { $set: updateFields },
+                upsert: true,
+              },
+            };
+          });
+
+          await resultCollection.bulkWrite(bulkOps);
+
+          // Ghost Detection: Mark dropouts with the "not found" object you requested
+          await resultCollection.updateMany(
+            { lastSeenExam: { $lt: currentExamSemester }, isArchived: false },
+            {
+              $set: {
+                isArchived: true,
+                [`semesters.${currentExamSemester}`]: { status: "removed" },
+              },
+            },
           );
-          res.status(200).send(dbresult);
 
-          // For now, send the JSON back to the frontend to see the magic
+          res
+            .status(200)
+            .send({ success: true, count: students.length, publishDate });
         } catch (error) {
-          // console.error("Parsing Error:", error);
+          console.error("UPLOAD ERROR:", error);
           res
             .status(500)
-            .send({ message: "Internal Server Error during parsing" });
+            .send({ message: "Server Error", error: error.message });
         }
       },
     );
