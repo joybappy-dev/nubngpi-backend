@@ -59,98 +59,100 @@ async function run() {
       res.status(200).send({ studentProfile, studentResult });
     });
 
-app.get("/api/latest/results", async (req, res) => {
-  try {
-    // 1. Find the highest lastSeenExam across the whole collection
-    const metadata = await resultCollection
-      .find({})
-      .sort({ lastSeenExam: -1 })
-      .limit(1)
-      .toArray();
+    app.get("/api/latest/results", async (req, res) => {
+      try {
+        // 1. Find the highest lastSeenExam across the whole collection
+        const metadata = await resultCollection
+          .find({})
+          .sort({ lastSeenExam: -1 })
+          .limit(1)
+          .toArray();
 
-    if (metadata.length === 0) return res.status(200).json([]);
-    
-    const globalLatestSemester = metadata[0].lastSeenExam;
+        if (metadata.length === 0) return res.status(200).json([]);
 
-    const latestResults = await resultCollection
-      .aggregate([
-        // 2. ONLY include students from the absolute latest upload who are NOT archived
-        {
-          $match: {
-            lastSeenExam: globalLatestSemester,
-            isArchived: false, // This automatically hides "removed" status students
-            roll: { $gte: "829428" } // Your specific range filter
-          },
-        },
-        // 3. Join with students collection
-        {
-          $lookup: {
-            from: "students",
-            localField: "roll",
-            foreignField: "roll",
-            as: "studentDetails",
-          },
-        },
-        // 4. Skip if student profile (name/image) is missing
-        {
-          $unwind: "$studentDetails",
-        },
-        // 5. Clean output for the latest semester only
-        {
-          $project: {
-            _id: 1,
-            roll: 1,
-            studentName: "$studentDetails.name",
-            registration: "$studentDetails.registration",
-            studentImage: "$studentDetails.img",
-            latestGPA: 1,
-            referredSubjects: 1,
-            // Extract specific details from the nested semesters object
-            status: {
-              $let: {
-                vars: {
-                  currentSem: { $objectToArray: "$semesters" }
-                },
-                in: {
-                  $arrayElemAt: [
-                    {
-                      $filter: {
-                        input: "$$currentSem",
-                        as: "s",
-                        cond: { $eq: [{ $toInt: "$$s.k" }, globalLatestSemester] }
-                      }
+        const globalLatestSemester = metadata[0].lastSeenExam;
+
+        const latestResults = await resultCollection
+          .aggregate([
+            // 2. ONLY include students from the absolute latest upload who are NOT archived
+            {
+              $match: {
+                lastSeenExam: globalLatestSemester,
+                isArchived: false, // This automatically hides "removed" status students
+                roll: { $gte: "829428" }, // Your specific range filter
+              },
+            },
+            // 3. Join with students collection
+            {
+              $lookup: {
+                from: "students",
+                localField: "roll",
+                foreignField: "roll",
+                as: "studentDetails",
+              },
+            },
+            // 4. Skip if student profile (name/image) is missing
+            {
+              $unwind: "$studentDetails",
+            },
+            // 5. Clean output for the latest semester only
+            {
+              $project: {
+                _id: 1,
+                roll: 1,
+                studentName: "$studentDetails.name",
+                registration: "$studentDetails.registration",
+                studentImage: "$studentDetails.img",
+                latestGPA: 1,
+                referredSubjects: 1,
+                // Extract specific details from the nested semesters object
+                status: {
+                  $let: {
+                    vars: {
+                      currentSem: { $objectToArray: "$semesters" },
                     },
-                    0
-                  ]
-                }
-              }
-            }
-          },
-        },
-        {
-          $project: {
-            _id: 1,
-            roll: 1,
-            studentName: 1,
-            registration: 1,
-            studentImage: 1,
-            latestGPA: 1,
-            referredSubjects: 1,
-            semester: { $literal: globalLatestSemester },
-            status: "$status.v.status",
-            publishedDate: "$status.v.publishedDate"
-          }
-        },
-        { $sort: { roll: 1 } },
-      ])
-      .toArray();
+                    in: {
+                      $arrayElemAt: [
+                        {
+                          $filter: {
+                            input: "$$currentSem",
+                            as: "s",
+                            cond: {
+                              $eq: [{ $toInt: "$$s.k" }, globalLatestSemester],
+                            },
+                          },
+                        },
+                        0,
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                roll: 1,
+                studentName: 1,
+                registration: 1,
+                studentImage: 1,
+                latestGPA: 1,
+                referredSubjects: 1,
+                semester: { $literal: globalLatestSemester },
+                status: "$status.v.status",
+                publishedDate: "$status.v.publishedDate",
+              },
+            },
+            { $sort: { roll: 1 } },
+          ])
+          .toArray();
 
-    res.status(200).json(latestResults);
-  } catch (error) {
-    console.error("Error fetching latest results:", error);
-    res.status(500).json({ message: "Internal Server Error" });
-  }
-});
+        res.status(200).json(latestResults);
+      } catch (error) {
+        console.error("Error fetching latest results:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
 
     app.post(
       "/api/upload-result",
@@ -167,12 +169,10 @@ app.get("/api/latest/results", async (req, res) => {
           const { students, currentExamSemester, publishDate } =
             parseBTEBResult(result.text);
 
-          if (students.length === 0) {
+          if (students.length === 0)
             return res.status(422).send({ message: "No student data found" });
-          }
 
           const bulkOps = students.map((s) => {
-            // Determine highest semester key to find the "latest" GPA
             const semKeys = Object.keys(s.gpas)
               .map(Number)
               .sort((a, b) => b - a);
@@ -189,18 +189,16 @@ app.get("/api/latest/results", async (req, res) => {
               isArchived: false,
             };
 
-            // Dynamically build the nested 'semesters' object using MongoDB dot notation
             semKeys.forEach((semNum) => {
               if (semNum === currentExamSemester) {
-                // Write full data for the current exam semester
                 updateFields[`semesters.${semNum}`] = {
                   gpa: s.gpas[semNum],
                   status: s.status,
                   publishedDate: publishDate,
                 };
               } else {
-                // For historical semesters, only update GPA and status (if they cleared a referral)
                 updateFields[`semesters.${semNum}.gpa`] = s.gpas[semNum];
+                // Only update historical status if they actually passed it
                 if (s.gpas[semNum] !== null) {
                   updateFields[`semesters.${semNum}.status`] = "PASSED";
                 }
@@ -218,7 +216,7 @@ app.get("/api/latest/results", async (req, res) => {
 
           await resultCollection.bulkWrite(bulkOps);
 
-          // Ghost Detection: Mark dropouts with the "not found" object you requested
+          // Ghost Detection: If not in PDF, they are "removed" from the active system
           await resultCollection.updateMany(
             { lastSeenExam: { $lt: currentExamSemester }, isArchived: false },
             {
